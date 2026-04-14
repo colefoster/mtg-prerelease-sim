@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AiAnalysis } from "../lib/ai";
 import { heuristicAnalyzePool, claudeAnalyzePool } from "../lib/ai";
 import type { DeckState, PoolCard } from "../types";
@@ -105,6 +105,20 @@ export function AiPanel({ deck, setName, onApplyBuild }: Props) {
   const [streaming, setStreaming] = useState("");
   const [claudeResult, setClaudeResult] = useState<AiAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
+
+  const ESTIMATED_SECONDS = 90;
+
+  useEffect(() => {
+    if (loading) {
+      setElapsed(0);
+      timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+      return () => clearInterval(timerRef.current);
+    } else {
+      clearInterval(timerRef.current);
+    }
+  }, [loading]);
 
   const allCards: PoolCard[] = useMemo(
     () => [...deck.zones.pool, ...deck.zones.main, ...deck.zones.side],
@@ -233,15 +247,33 @@ export function AiPanel({ deck, setName, onApplyBuild }: Props) {
           {/* Claude tab */}
           {tab === "claude" && (
             <>
-              {loading && streaming && (
-                <div className="text-xs text-ctp-overlay1 bg-ctp-base/50 rounded p-3 max-h-48 overflow-y-auto font-mono whitespace-pre-wrap mb-3">
-                  {streaming.slice(-600)}
-                  <span className="animate-pulse">▍</span>
-                </div>
-              )}
-              {loading && !streaming && (
-                <div className="text-sm text-ctp-overlay0 py-6 text-center">
-                  <span className="animate-pulse">Sending pool to Claude…</span>
+              {loading && (
+                <div className="mb-3">
+                  {/* Progress bar */}
+                  <div className="flex items-center justify-between text-[11px] text-ctp-overlay1 mb-1.5">
+                    <span>
+                      {streaming ? "Claude is analyzing…" : "Sending pool to Claude…"}
+                    </span>
+                    <span className="tabular-nums">
+                      {elapsed}s / ~{ESTIMATED_SECONDS}s
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-ctp-surface0 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-ctp-mauve transition-all duration-1000 ease-linear"
+                      style={{
+                        width: `${Math.min((elapsed / ESTIMATED_SECONDS) * 100, 95)}%`,
+                      }}
+                    />
+                  </div>
+
+                  {/* Streaming preview */}
+                  {streaming && (
+                    <div className="mt-2 text-xs text-ctp-overlay1 bg-ctp-base/50 rounded p-3 max-h-40 overflow-y-auto font-mono whitespace-pre-wrap">
+                      {streaming.slice(-600)}
+                      <span className="animate-pulse">▍</span>
+                    </div>
+                  )}
                 </div>
               )}
               {error && (
