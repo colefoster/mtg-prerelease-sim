@@ -15,32 +15,39 @@ interface Card {
 }
 
 function formatPool(cards: Card[]): string {
-  return cards
-    .map(
-      (c) =>
-        `${c.name} | ${c.manaCost} | ${c.typeLine} | ${c.rarity} | ${c.oracleText.slice(0, 120)}`,
-    )
-    .join("\n");
+  // Group by rarity for compact display
+  const byRarity = new Map<string, Card[]>();
+  for (const c of cards) {
+    const r = c.rarity;
+    if (!byRarity.has(r)) byRarity.set(r, []);
+    byRarity.get(r)!.push(c);
+  }
+
+  const lines: string[] = [];
+  for (const [rarity, group] of byRarity) {
+    lines.push(`[${rarity.toUpperCase()}]`);
+    for (const c of group) {
+      // Compact: name, cost, type, and short oracle text for rares/mythics only
+      const oracle = (rarity === "rare" || rarity === "mythic")
+        ? ` | ${c.oracleText.slice(0, 80)}`
+        : "";
+      lines.push(`${c.name} | ${c.manaCost} | ${c.typeLine}${oracle}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function buildPrompt(cards: Card[], setName: string): string {
-  return `You are an expert Magic: The Gathering limited/sealed deck builder. You are analyzing a sealed pool from the ${setName} prerelease.
+  return `You are an expert MTG sealed deck builder. Analyze this ${setName} prerelease pool and build the best 40-card deck.
 
 ## Pool (${cards.length} cards)
 ${formatPool(cards)}
 
-## Task
-Build the best possible 40-card sealed deck from this pool. You must:
+## Instructions
+Pick the best 2-color pair (splash if a bomb demands it). Select exactly 23 non-land spells + 17 lands (suggest basic land split). Be concise.
 
-1. **Analyze** the pool — identify bombs, removal, key synergies, and color depth
-2. **Choose colors** — pick the best 2-color pair (or splash if a bomb demands it), explain why
-3. **Build the deck** — select exactly 23 non-land cards for the main deck
-4. **Suggest lands** — recommend basic land counts (17 total lands)
-5. **Commentary** — brief notes on the deck's game plan, strengths, weaknesses, and key cards
-
-## Response Format
-Respond ONLY with this JSON (no markdown fences, no extra text):
-{"analysis":"2-3 sentence overview of pool quality","colors":{"primary":"W or U or B or R or G","secondary":"W or U or B or R or G","splash":null,"reasoning":"why these colors"},"mainDeck":["Card Name","Card Name"],"basics":{"W":0,"U":0,"B":0,"R":0,"G":0},"commentary":{"gameplan":"1-2 sentences","strengths":"1-2 sentences","weaknesses":"1-2 sentences","keyCards":["Card Name — why important","Card Name — why"],"mulliganGuide":"1 sentence"}}`;
+Respond ONLY with JSON, no markdown fences:
+{"analysis":"2-3 sentences on pool quality","colors":{"primary":"W/U/B/R/G","secondary":"W/U/B/R/G","splash":null,"reasoning":"why"},"mainDeck":["Card Name","Card Name"],"basics":{"W":0,"U":0,"B":0,"R":0,"G":0},"commentary":{"gameplan":"1-2 sentences","strengths":"1 sentence","weaknesses":"1 sentence","keyCards":["Card — why","Card — why"],"mulliganGuide":"1 sentence"}}`;
 }
 
 async function handleAnalyze(
@@ -74,7 +81,13 @@ async function handleAnalyze(
     Connection: "keep-alive",
   });
 
-  const proc = spawn(CLAUDE_BIN, ["-p", "--verbose", "--output-format", "stream-json"], {
+  // Send keepalives so Cloudflare doesn't timeout the connection
+  res.write(`: connected\n\n`);
+  const keepalive = setInterval(() => {
+    res.write(`: keepalive\n\n`);
+  }, 10000);
+
+  const proc = spawn(CLAUDE_BIN, ["-p", "--verbose", "--output-format", "stream-json", "--model", "haiku"], {
     env: { ...process.env, PATH: `${process.env.HOME}/.npm-global/bin:${process.env.PATH}` },
   });
 
@@ -117,6 +130,7 @@ async function handleAnalyze(
   });
 
   proc.on("close", (code) => {
+    clearInterval(keepalive);
     if (buffer.trim()) {
       try {
         const event = JSON.parse(buffer);
@@ -143,6 +157,7 @@ async function handleAnalyze(
 
   // Clean up if client disconnects
   req.on("close", () => {
+    clearInterval(keepalive);
     proc.kill();
   });
 }
