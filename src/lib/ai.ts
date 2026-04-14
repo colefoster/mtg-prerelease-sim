@@ -13,9 +13,9 @@ const COLOR_NAMES: Record<Color, string> = {
 export interface AiAnalysis {
   analysis: string;
   colors: {
-    primary: Color;
-    secondary: Color;
-    splash: Color | null;
+    primary: string;
+    secondary: string;
+    splash: string | null;
     reasoning: string;
   };
   mainDeck: string[];
@@ -28,6 +28,78 @@ export interface AiAnalysis {
     mulliganGuide: string;
   };
 }
+
+// ─── Claude-powered analysis (via server) ───
+
+export async function claudeAnalyzePool(
+  cards: PoolCard[],
+  setName: string,
+  onChunk: (text: string) => void,
+): Promise<AiAnalysis> {
+  const payload = {
+    setName,
+    cards: cards.map((pc) => ({
+      name: pc.card.name,
+      rarity: pc.card.rarity,
+      colors: pc.card.colors,
+      manaCost: pc.card.manaCost,
+      cmc: pc.card.cmc,
+      typeLine: pc.card.typeLine,
+      oracleText: pc.card.oracleText,
+    })),
+  };
+
+  const res = await fetch("/api/analyze-pool", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Request failed" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    for (const line of chunk.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6).trim();
+      if (data === "[DONE]") break;
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.error) throw new Error(parsed.error);
+        if (parsed.result) {
+          // Final complete result from claude
+          fullText = parsed.result;
+          onChunk(fullText);
+        } else if (parsed.text) {
+          fullText += parsed.text;
+          onChunk(fullText);
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
+      }
+    }
+  }
+
+  // Extract JSON from the response
+  const jsonMatch =
+    fullText.match(/```json\s*([\s\S]*?)```/) ||
+    fullText.match(/(\{[\s\S]*\})/);
+  if (!jsonMatch) throw new Error("Could not parse AI response");
+
+  return JSON.parse(jsonMatch[1]) as AiAnalysis;
+}
+
+// ─── Heuristic analysis (instant, client-side) ───
 
 function countPips(manaCost: string): Record<Color, number> {
   const pips: Record<Color, number> = { W: 0, U: 0, B: 0, R: 0, G: 0 };
@@ -62,14 +134,9 @@ function isBomb(pc: PoolCard): boolean {
   if (pc.card.rarity === "mythic") return true;
   if (pc.card.rarity === "rare") {
     const t = pc.card.oracleText.toLowerCase();
-    // Heuristic: rares with evasion, card advantage, or big effects
     if (
-      t.includes("flying") ||
-      t.includes("draw") ||
-      t.includes("each opponent") ||
-      t.includes("all creatures") ||
-      t.includes("whenever") ||
-      t.includes("token")
+      t.includes("flying") || t.includes("draw") || t.includes("each opponent") ||
+      t.includes("all creatures") || t.includes("whenever") || t.includes("token")
     )
       return true;
   }
@@ -79,17 +146,13 @@ function isBomb(pc: PoolCard): boolean {
 function isEvasion(pc: PoolCard): boolean {
   const t = pc.card.oracleText.toLowerCase();
   return (
-    t.includes("flying") ||
-    t.includes("menace") ||
-    t.includes("trample") ||
-    t.includes("unblockable") ||
-    t.includes("can't be blocked")
+    t.includes("flying") || t.includes("menace") || t.includes("trample") ||
+    t.includes("unblockable") || t.includes("can't be blocked")
   );
 }
 
 function cardColors(pc: PoolCard): Color[] {
   if (pc.card.colors.length > 0) return pc.card.colors as Color[];
-  // Derive from mana cost
   const pips = countPips(pc.card.manaCost);
   return COLORS.filter((c) => pips[c] > 0);
 }
@@ -97,7 +160,7 @@ function cardColors(pc: PoolCard): Color[] {
 function fitsColors(pc: PoolCard, pair: [Color, Color], splash?: Color): boolean {
   if (isLand(pc)) return true;
   const colors = cardColors(pc);
-  if (colors.length === 0) return true; // colorless
+  if (colors.length === 0) return true;
   const allowed = new Set<string>([...pair]);
   if (splash) allowed.add(splash);
   return colors.every((c) => allowed.has(c));
@@ -111,7 +174,6 @@ interface ColorPairEval {
   creatures: PoolCard[];
   evasion: PoolCard[];
   playables: PoolCard[];
-  totalPips: Record<Color, number>;
 }
 
 function evaluateColorPair(allCards: PoolCard[], pair: [Color, Color]): ColorPairEval {
@@ -121,13 +183,6 @@ function evaluateColorPair(allCards: PoolCard[], pair: [Color, Color]): ColorPai
   const creatures = nonLands.filter(isCreature);
   const evasion = nonLands.filter(isEvasion);
 
-  const totalPips: Record<Color, number> = { W: 0, U: 0, B: 0, R: 0, G: 0 };
-  for (const c of nonLands) {
-    const pips = countPips(c.card.manaCost);
-    for (const color of COLORS) totalPips[color] += pips[color];
-  }
-
-  // Score the pair
   let score = 0;
   score += bombs.length * 5;
   score += removal.length * 3;
@@ -135,23 +190,20 @@ function evaluateColorPair(allCards: PoolCard[], pair: [Color, Color]): ColorPai
   score += creatures.length * 0.8;
   score += nonLands.length * 0.3;
 
-  // Curve bonus
   const twos = nonLands.filter((c) => Math.floor(c.card.cmc) === 2).length;
   const threes = nonLands.filter((c) => Math.floor(c.card.cmc) === 3).length;
   score += Math.min(twos, 5) * 0.5;
   score += Math.min(threes, 4) * 0.5;
 
-  // Depth bonus
   if (nonLands.length >= 23) score += 5;
   else if (nonLands.length >= 20) score += 2;
-  else score -= (23 - nonLands.length) * 2; // penalty for shallow pools
+  else score -= (23 - nonLands.length) * 2;
 
-  // Creature count
   if (creatures.length >= 13) score += 3;
   else if (creatures.length >= 10) score += 1;
   else score -= 2;
 
-  return { pair, score, bombs, removal, creatures, evasion, playables: nonLands, totalPips };
+  return { pair, score, bombs, removal, creatures, evasion, playables: nonLands };
 }
 
 function cardPower(pc: PoolCard): number {
@@ -171,13 +223,11 @@ function cardPower(pc: PoolCard): number {
 
 function selectMainDeck(playables: PoolCard[], target: number): PoolCard[] {
   const sorted = [...playables].sort((a, b) => cardPower(b) - cardPower(a));
-
   const selected: PoolCard[] = [];
   const cmcBudget = new Map<number, number>([
     [1, 3], [2, 5], [3, 5], [4, 4], [5, 3], [6, 2],
   ]);
 
-  // Pass 1: fill curve slots
   for (const card of sorted) {
     if (selected.length >= target) break;
     const bucket = Math.min(Math.floor(card.card.cmc), 6);
@@ -186,7 +236,6 @@ function selectMainDeck(playables: PoolCard[], target: number): PoolCard[] {
     if (cur < max) selected.push(card);
   }
 
-  // Pass 2: fill remaining with best available
   if (selected.length < target) {
     const ids = new Set(selected.map((c) => c.instanceId));
     for (const card of sorted) {
@@ -248,7 +297,6 @@ function checkSplash(
 
   if (offColorBombs.length === 0) return { splash: null, splashCards: [], reason: "" };
 
-  // Group by color, pick best splash
   const byColor = new Map<Color, PoolCard[]>();
   for (const { color, card } of offColorBombs) {
     if (!byColor.has(color)) byColor.set(color, []);
@@ -260,7 +308,7 @@ function checkSplash(
   let bestValue = 0;
   for (const [color, cards] of byColor) {
     const value = cards.reduce((s, c) => s + cardPower(c), 0);
-    if (value > bestValue && value >= 5) { // only splash if it's worth it
+    if (value > bestValue && value >= 5) {
       bestValue = value;
       bestSplash = color;
       bestCards = cards;
@@ -277,11 +325,10 @@ function checkSplash(
   };
 }
 
-export function analyzePool(deck: DeckState): AiAnalysis {
+export function heuristicAnalyzePool(deck: DeckState): AiAnalysis {
   const allCards = [...deck.zones.pool, ...deck.zones.main, ...deck.zones.side];
   const nonLands = allCards.filter((c) => !isLand(c));
 
-  // Evaluate all 10 color pairs
   const pairs: ColorPairEval[] = [];
   for (let i = 0; i < COLORS.length; i++) {
     for (let j = i + 1; j < COLORS.length; j++) {
@@ -292,10 +339,8 @@ export function analyzePool(deck: DeckState): AiAnalysis {
   const best = pairs[0];
   const runnerUp = pairs[1];
 
-  // Check for splash
   const { splash, splashCards, reason: splashReason } = checkSplash(allCards, best.pair);
 
-  // Build main deck
   let playables = [...best.playables];
   if (splash) {
     for (const sc of splashCards) {
@@ -305,7 +350,6 @@ export function analyzePool(deck: DeckState): AiAnalysis {
     }
   }
 
-  // Add on-color non-basic lands
   const onColorLands = allCards.filter(
     (c) => !c.card.isBasicLand && isLand(c) && fitsColors(c, best.pair, splash ?? undefined),
   );
@@ -316,23 +360,19 @@ export function analyzePool(deck: DeckState): AiAnalysis {
   const mainCards = [...mainSpells, ...onColorLands];
   const basics = suggestBasicsForDeck(mainCards, 17);
 
-  // Build commentary
   const allBombs = allCards.filter(isBomb);
   const allRemoval = nonLands.filter(isRemoval);
   const poolCreatures = nonLands.filter(isCreature);
 
-  // Analysis text
   const quality =
     allBombs.length >= 4 ? "excellent" :
     allBombs.length >= 2 ? "solid" :
     allBombs.length === 1 ? "decent" : "below average";
   const analysis = `${quality.charAt(0).toUpperCase() + quality.slice(1)} pool with ${allBombs.length} bomb${allBombs.length !== 1 ? "s" : ""}, ${allRemoval.length} removal spell${allRemoval.length !== 1 ? "s" : ""}, and ${poolCreatures.length} creatures across all colors. ${COLOR_NAMES[best.pair[0]]}-${COLOR_NAMES[best.pair[1]]} is the deepest color pair with ${best.playables.length} playables${runnerUp ? `, ahead of ${COLOR_NAMES[runnerUp.pair[0]]}-${COLOR_NAMES[runnerUp.pair[1]]} (${runnerUp.playables.length})` : ""}.`;
 
-  // Color reasoning
   let reasoning = `${COLOR_NAMES[best.pair[0]]}-${COLOR_NAMES[best.pair[1]]} offers ${best.bombs.length} bombs, ${best.removal.length} removal, and ${best.creatures.length} creatures with a solid curve.`;
   if (splash) reasoning += ` ${splashReason}.`;
 
-  // Gameplan
   const mainCreatures = mainCards.filter(isCreature);
   const mainEvasion = mainCards.filter(isEvasion);
   const avgCmc = mainSpells.reduce((s, c) => s + c.card.cmc, 0) / (mainSpells.length || 1);
@@ -342,7 +382,6 @@ export function analyzePool(deck: DeckState): AiAnalysis {
       ? `Midrange deck (${avgCmc.toFixed(1)} avg CMC) that aims to stabilize the board with ${mainCreatures.length} creatures and out-value the opponent with bombs and removal.`
       : `Controlling deck (${avgCmc.toFixed(1)} avg CMC) that plays for the late game — survive early, then take over with powerful threats.`;
 
-  // Strengths
   const strengthParts: string[] = [];
   if (best.bombs.length >= 2) strengthParts.push(`multiple bombs (${best.bombs.map((c) => c.card.name).join(", ")})`);
   if (best.removal.length >= 3) strengthParts.push(`deep removal suite`);
@@ -352,7 +391,6 @@ export function analyzePool(deck: DeckState): AiAnalysis {
     ? `Key strengths: ${strengthParts.join(", ")}.`
     : `Reasonable card quality across the board.`;
 
-  // Weaknesses
   const weakParts: string[] = [];
   if (best.removal.length < 2) weakParts.push(`thin on removal (${best.removal.length})`);
   if (mainCreatures.length < 12) weakParts.push(`low creature count (${mainCreatures.length})`);
@@ -364,7 +402,6 @@ export function analyzePool(deck: DeckState): AiAnalysis {
     ? `Watch out for: ${weakParts.join(", ")}.`
     : `No major weaknesses — solid build overall.`;
 
-  // Key cards
   const keyCards: string[] = [];
   for (const b of best.bombs.slice(0, 3)) {
     const why = b.card.rarity === "mythic" ? "windmill slam bomb" : "powerful rare";
@@ -374,14 +411,12 @@ export function analyzePool(deck: DeckState): AiAnalysis {
     keyCards.push(`${r.card.name} — premium removal, always play this`);
   }
   if (keyCards.length === 0) {
-    // Pick best cards by power
     const topCards = [...mainCards].sort((a, b) => cardPower(b) - cardPower(a)).slice(0, 3);
     for (const c of topCards) {
       keyCards.push(`${c.card.name} — one of your best cards`);
     }
   }
 
-  // Mulligan guide
   const mulliganGuide = best.bombs.length > 0
     ? `Keep hands with 2-4 lands and early plays. Mulligan aggressively for ${best.bombs[0].card.name} if your hand is otherwise weak.`
     : `Keep hands with good mana and a curve — prioritize 2-drop into 3-drop openings.`;
@@ -396,12 +431,6 @@ export function analyzePool(deck: DeckState): AiAnalysis {
     },
     mainDeck: mainCards.map((c) => c.card.name),
     basics,
-    commentary: {
-      gameplan,
-      strengths,
-      weaknesses,
-      keyCards,
-      mulliganGuide,
-    },
+    commentary: { gameplan, strengths, weaknesses, keyCards, mulliganGuide },
   };
 }

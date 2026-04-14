@@ -501,6 +501,7 @@ export function BuildPage() {
             {/* AI Analysis */}
             <AiPanel
               deck={deck}
+              setName={set.name}
               onApplyBuild={handleAiBuild}
             />
 
