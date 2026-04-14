@@ -8,8 +8,10 @@ function bucketCards(cards: Card[]) {
   const mythic: Card[] = [];
   const basicLand: Card[] = [];
 
+  const anyBooster = cards.some((c) => c.booster);
+
   for (const card of cards) {
-    if (!card.booster) continue;
+    if (anyBooster && !card.booster) continue;
     if (card.isBasicLand) {
       basicLand.push(card);
       continue;

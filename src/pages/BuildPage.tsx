@@ -22,6 +22,7 @@ import {
 } from "../lib/deck";
 import { autoBuild } from "../lib/autobuilder";
 import type { BasicLands, Card, DeckState, PoolCard } from "../types";
+import { AiPanel } from "../components/AiPanel";
 import { DraggableCard } from "../components/DraggableCard";
 import { DropZone } from "../components/DropZone";
 import { HoverPreview } from "../components/HoverPreview";
@@ -208,6 +209,36 @@ export function BuildPage() {
     if (!deck) return;
     setDeck(autoBuild(deck));
   }, [deck]);
+
+  const handleAiBuild = useCallback(
+    (mainNames: string[], basics: BasicLands) => {
+      if (!deck) return;
+      const allCards = [
+        ...deck.zones.pool,
+        ...deck.zones.main,
+        ...deck.zones.side,
+      ];
+      const mainCards: PoolCard[] = [];
+      const remaining = [...allCards];
+
+      for (const name of mainNames) {
+        const idx = remaining.findIndex(
+          (c) => c.card.name.toLowerCase() === name.toLowerCase(),
+        );
+        if (idx !== -1) {
+          mainCards.push(remaining[idx]);
+          remaining.splice(idx, 1);
+        }
+      }
+
+      setDeck({
+        ...deck,
+        zones: { pool: [], main: mainCards, side: remaining },
+        basics,
+      });
+    },
+    [deck],
+  );
 
   const handleNewPacks = useCallback(() => {
     if (!set || !seed) return;
@@ -466,6 +497,12 @@ export function BuildPage() {
                 ))}
               </div>
             </div>
+
+            {/* AI Analysis */}
+            <AiPanel
+              deck={deck}
+              onApplyBuild={handleAiBuild}
+            />
 
             {/* Sideboard */}
             <DropZone
